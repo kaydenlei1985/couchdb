@@ -47,7 +47,8 @@ indexer_test_() ->
                     ?TDEF_FE(fewer_multipe_identical_keys_from_same_doc),
                     ?TDEF_FE(handle_size_key_limits),
                     ?TDEF_FE(handle_size_value_limits),
-                    ?TDEF_FE(index_autoupdater_callback)
+                    ?TDEF_FE(index_autoupdater_callback),
+                    ?TDEF_FE(index_can_recover_from_crash, 60)
                 ]
             }
         }
@@ -372,6 +373,41 @@ index_autoupdater_callback(Db) ->
     ?assertEqual(ok, couch_views_jobs:wait_for_job(JobId, DbSeq)).
 
 
+index_can_recover_from_crash(Db) ->
+    ok = meck:new(config, [passthrough]),
+    ok = meck:expect(config, get_integer, fun(Section, Key, Default) ->
+        case Section == "couch_views" andalso Key == "change_limit" of
+            true -> 1;
+            _ -> Default
+        end
+    end),
+    meck:new(couch_eval, [passthrough]),
+    meck:expect(couch_eval, map_docs, fun(State, Docs) ->
+        Doc = hd(Docs),
+        case Doc#doc.id == <<"2">> of
+            true ->
+                % remove the mock so that next time the doc is processed
+                % it will work
+                meck:unload(couch_eval),
+                throw({fake_crash, test_jobs_restart});
+            false ->
+                meck:passthrough([State, Docs])
+        end
+    end),
+
+    DDoc = create_ddoc(),
+    Docs = make_docs(3),
+    {ok, _} = fabric2_db:update_doc(Db, DDoc, []),
+    {ok, _} = fabric2_db:update_docs(Db, Docs, []),
+
+    {ok, Out} = run_query(Db, DDoc, ?MAP_FUN1),
+    ?assertEqual([
+        row(<<"1">>, 1, 1),
+        row(<<"2">>, 2, 2),
+        row(<<"3">>, 3, 3)
+    ], Out).
+
+
 row(Id, Key, Value) ->
     {row, [
         {id, Id},
@@ -465,6 +501,10 @@ create_ddoc(multi_emit_key_limit) ->
             ]}}
         ]}}
     ]}).
+
+
+make_docs(Count) ->
+    [doc(I) || I <- lists:seq(1, Count)].
 
 
 doc(Id) ->

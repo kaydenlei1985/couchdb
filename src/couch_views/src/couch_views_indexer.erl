@@ -18,7 +18,9 @@
 
 
 -export([
-    init/0
+    init/0,
+    map_docs/2,
+    write_docs/4
 ]).
 
 -ifdef(TEST).
@@ -88,6 +90,7 @@ init() ->
         db_seq => undefined,
         view_seq => undefined,
         last_seq => undefined,
+        view_vs => undefined,
         job => Job,
         job_data => Data,
         count => 0,
@@ -123,10 +126,15 @@ init() ->
 
 
 upgrade_data(Data) ->
-    case maps:is_key(<<"retries">>, Data) of
-        true -> Data;
-        false -> Data#{<<"retries">> =>0}
-    end.
+    Defaults = [
+        {<<"retries">>, 0}
+    ],
+    lists:foldl(fun({Key, Default}, Acc) ->
+        case maps:is_key(Key, Acc) of
+            true -> Acc;
+            false -> maps:put(Key, Default, Acc)
+        end
+    end, Data, Defaults).
 
 
 % Transaction limit exceeded don't retry
@@ -157,22 +165,7 @@ add_error(Error, Reason, Data) ->
 
 update(#{} = Db, Mrst0, State0) ->
     {Mrst2, State4} = fabric2_fdb:transactional(Db, fun(TxDb) ->
-        % In the first iteration of update we need
-        % to populate our db and view sequences
-        State1 = case State0 of
-            #{db_seq := undefined} ->
-                ViewSeq = couch_views_fdb:get_update_seq(TxDb, Mrst0),
-                State0#{
-                    tx_db := TxDb,
-                    db_seq := fabric2_db:get_update_seq(TxDb),
-                    view_seq := ViewSeq,
-                    last_seq := ViewSeq
-                };
-            _ ->
-                State0#{
-                    tx_db := TxDb
-                }
-        end,
+        State1 = get_update_start_state(TxDb, Mrst0, State0),
 
         {ok, State2} = fold_changes(State1),
 
@@ -180,7 +173,8 @@ update(#{} = Db, Mrst0, State0) ->
             count := Count,
             limit := Limit,
             doc_acc := DocAcc,
-            last_seq := LastSeq
+            last_seq := LastSeq,
+            view_vs := ViewVS
         } = State2,
 
         DocAcc1 = fetch_docs(TxDb, DocAcc),
@@ -189,6 +183,8 @@ update(#{} = Db, Mrst0, State0) ->
 
         case Count < Limit of
             true ->
+                maybe_set_build_status(TxDb, Mrst1, ViewVS,
+                    ?INDEX_READY),
                 report_progress(State2, finished),
                 {Mrst1, finished};
             false ->
@@ -210,6 +206,33 @@ update(#{} = Db, Mrst0, State0) ->
     end.
 
 
+maybe_set_build_status(_TxDb, _Mrst1, not_found, _State) ->
+    ok;
+
+maybe_set_build_status(TxDb, Mrst1, _ViewVS, State) ->
+    couch_views_fdb:set_build_state(TxDb, Mrst1, State).
+
+
+% In the first iteration of update we need
+% to populate our db and view sequences
+get_update_start_state(TxDb, Mrst, #{db_seq := undefined} = State) ->
+    ViewVS = couch_views_fdb:get_creation_vs(TxDb, Mrst),
+    ViewSeq = couch_views_fdb:get_update_seq(TxDb, Mrst),
+
+    State#{
+        tx_db := TxDb,
+        db_seq := fabric2_db:get_update_seq(TxDb),
+        view_vs := ViewVS,
+        view_seq := ViewSeq,
+        last_seq := ViewSeq
+    };
+
+get_update_start_state(TxDb, _Idx, State) ->
+    State#{
+        tx_db := TxDb
+    }.
+
+
 fold_changes(State) ->
     #{
         view_seq := SinceSeq,
@@ -226,7 +249,8 @@ process_changes(Change, Acc) ->
     #{
         doc_acc := DocAcc,
         count := Count,
-        design_opts := DesignOpts
+        design_opts := DesignOpts,
+        view_vs := ViewVS
     } = Acc,
 
     #{
@@ -249,8 +273,14 @@ process_changes(Change, Acc) ->
                 last_seq := LastSeq
             }
     end,
-    {ok, Acc1}.
 
+    DocVS = fabric2_fdb:seq_to_vs(LastSeq),
+    Go = if DocVS == ViewVS -> stop; true -> ok end,
+    {Go, Acc1}.
+
+
+map_docs(Mrst, []) ->
+    {Mrst, []};
 
 map_docs(Mrst, Docs) ->
     % Run all the non deleted docs through the view engine and
@@ -313,7 +343,9 @@ write_docs(TxDb, Mrst, Docs, State) ->
         couch_views_fdb:write_doc(TxDb, Sig, ViewIds, Doc1)
     end, Docs),
 
-    couch_views_fdb:set_update_seq(TxDb, Sig, LastSeq).
+    if LastSeq == false -> ok; true ->
+        couch_views_fdb:set_update_seq(TxDb, Sig, LastSeq)
+    end.
 
 
 fetch_docs(Db, Changes) ->

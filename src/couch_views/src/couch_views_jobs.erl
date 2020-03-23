@@ -40,11 +40,26 @@ build_view(TxDb, Mrst, UpdateSeq) ->
     end.
 
 
-build_view_async(TxDb, Mrst) ->
-    JobId = job_id(TxDb, Mrst),
-    JobData = job_data(TxDb, Mrst),
-    ok = couch_jobs:add(undefined, ?INDEX_JOB_TYPE, JobId, JobData),
+build_view_async(TxDb0, Mrst) ->
+    JobId = job_id(TxDb0, Mrst),
+    JobData = job_data(TxDb0, Mrst),
+    TxDb1 = ensure_correct_tx(TxDb0),
+
+    ok = couch_jobs:add(TxDb1, ?INDEX_JOB_TYPE, JobId, JobData),
     {ok, JobId}.
+
+
+ensure_correct_tx(#{tx := undefined} = TxDb) ->
+    TxDb;
+
+ensure_correct_tx(#{tx := Tx} = TxDb) ->
+    case erlfdb:is_read_only(Tx) of
+        true -> TxDb#{
+            tx := undefined
+        };
+        false ->
+            TxDb
+    end.
 
 
 wait_for_job(JobId, UpdateSeq) ->
