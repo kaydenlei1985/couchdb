@@ -82,6 +82,8 @@ wait_for_job(JobId, Subscription, UpdateSeq) ->
             erlang:error(Error);
         {finished, #{<<"error">> := Error, <<"reason">> := Reason}} ->
             erlang:error({binary_to_existing_atom(Error, latin1), Reason});
+        {finished, #{<<"build_to_vs">> := true}} ->
+            ok;
         {finished, #{<<"view_seq">> := ViewSeq}} when ViewSeq >= UpdateSeq ->
             ok;
         {finished, _} ->
