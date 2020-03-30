@@ -208,7 +208,7 @@ jwt_authentication_handler(Req) ->
     end.
 
 get_configured_claims() ->
-    Claims = config:get("jwt_auth", "required_claims", ""),
+    Claims = config:get("jwt_auth", "required_claims", "exp,nbf"),
     case re:split(Claims, "\s*,\s*", [{return, list}]) of
         [[]] ->
             []; %% if required_claims is the empty string.
